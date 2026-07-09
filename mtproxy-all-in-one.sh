@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# MTProxy Ultimate Suite (C Engine + Bulletproof CLI + Hardened Web GUI)
-# HTTP Copy-Safe | Sponsor Managed Strictly via CLI
+# MTProxy Ultimate Suite (C Engine + Hardened Web GUI + Privileged Port Fix)
+# Safe against CRLF / SSH Paste Truncation | Auto grants cap_net_bind_service
 # ==============================================================================
 
 INSTALL_DIR="/opt/mtproxy"
@@ -60,6 +60,13 @@ select_tls_domain() {
     done
 }
 
+apply_port_capabilities() {
+    # Grants unprivileged user ability to bind ports < 1024 (e.g., 443, 80)
+    if [[ -f "$BIN_PATH" ]]; then
+        setcap cap_net_bind_service=+ep "$BIN_PATH" 2>/dev/null || true
+    fi
+}
+
 update_systemd_service() {
     source "$CONFIG_FILE"
     TAG_FLAG=""
@@ -86,6 +93,7 @@ update_systemd_service() {
         "[Install]" \
         "WantedBy=multi-user.target" > "$SERVICE_FILE"
 
+    apply_port_capabilities
     systemctl daemon-reload
 }
 
@@ -96,6 +104,8 @@ import os
 import subprocess
 import psutil
 import urllib.request
+import json
+import base64
 from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, Response
 
@@ -104,6 +114,7 @@ app = Flask(__name__)
 GUI_USER = os.getenv("GUI_USER", "admin")
 GUI_PASS = os.getenv("GUI_PASS", "redteam2026")
 CONFIG_FILE = "/opt/mtproxy/config.env"
+GUI_CONFIG_FILE = "/opt/mtproxy/gui.env"
 
 def check_auth(username, password):
     return username == GUI_USER and password == GUI_PASS
@@ -122,10 +133,10 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-def read_env_config():
+def read_env_config(filepath):
     cfg = {}
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, "r") as f:
+    if os.path.exists(filepath):
+        with open(filepath, "r") as f:
             for line in f:
                 if "=" in line and not line.strip().startswith("#"):
                     k, v = line.strip().split("=", 1)
@@ -177,7 +188,6 @@ HTML_TEMPLATE = """
             <div id="status-badge" class="px-4 py-1.5 rounded-full text-xs font-semibold bg-dark-700 border border-gray-700">Checking...</div>
         </header>
 
-        <!-- Metrics Grid -->
         <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div class="bg-dark-800 p-4 rounded-xl red-glow-sm flex flex-col justify-between">
                 <span class="text-xs text-gray-400 font-semibold uppercase">CPU Usage</span>
@@ -205,12 +215,10 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- Better Active Link Controller Section -->
         <div class="bg-dark-800 p-6 rounded-xl red-glow space-y-4">
             <h2 class="text-sm font-semibold uppercase tracking-wider text-crimson-400">Active Connection Link Controller</h2>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                 
-                <!-- Fake-TLS Card -->
                 <div class="bg-dark-900 p-4 rounded-lg border border-gray-800 flex flex-col justify-between space-y-2">
                     <div>
                         <div class="flex justify-between items-center mb-2">
@@ -230,7 +238,6 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
-                <!-- Random Padding Card -->
                 <div class="bg-dark-900 p-4 rounded-lg border border-gray-800 flex flex-col justify-between space-y-2">
                     <div>
                         <div class="flex justify-between items-center mb-2">
@@ -249,7 +256,6 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
-                <!-- Standard Card -->
                 <div class="bg-dark-900 p-4 rounded-lg border border-gray-800 flex flex-col justify-between space-y-2">
                     <div>
                         <div class="flex justify-between items-center mb-2">
@@ -271,37 +277,51 @@ HTML_TEMPLATE = """
             </div>
         </div>
 
-        <!-- Controls & Logs -->
         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div class="bg-dark-800 p-6 rounded-xl red-glow space-y-4">
-                <h2 class="text-sm font-semibold uppercase tracking-wider text-crimson-400">System Controls</h2>
-                
-                <!-- Raw Secret Box for @MTProxybot -->
-                <div class="bg-dark-900 p-3 rounded-lg border border-crimson-500/50 space-y-1">
-                    <div class="flex justify-between items-center">
-                        <span class="text-xs font-bold text-crimson-400">RAW BASE SECRET (For @MTProxybot registration)</span>
-                        <button onclick="copyVal('raw-sec-val')" class="text-[11px] bg-crimson-600 hover:bg-crimson-500 px-2.5 py-1 rounded text-white font-semibold transition">Copy Raw Secret</button>
+            <div class="space-y-6">
+                <div class="bg-dark-800 p-6 rounded-xl red-glow space-y-3">
+                    <h2 class="text-sm font-semibold uppercase tracking-wider text-crimson-400">Server Migration & Backup</h2>
+                    <p class="text-xs text-gray-400 mb-2">Export your current server config, or import an exported Base64 string to clone a setup.</p>
+                    
+                    <button onclick="exportBackup()" class="w-full bg-dark-700 hover:bg-dark-900 border border-gray-600 hover:border-crimson-500 text-white py-2 rounded-lg text-xs font-semibold transition">EXPORT SETTINGS TO CLIPBOARD</button>
+                    
+                    <div class="flex space-x-2 pt-1">
+                        <input id="input-backup" type="text" placeholder="Paste Base64 Backup String here..." class="flex-1 bg-dark-900 border border-gray-700 rounded p-2 text-xs text-white font-mono">
+                        <button onclick="importBackup()" class="bg-crimson-600 hover:bg-crimson-500 px-4 py-2 rounded text-xs font-semibold text-white transition">RESTORE</button>
                     </div>
-                    <input id="raw-sec-val" readonly class="w-full bg-dark-800 border border-gray-700 rounded p-1.5 text-xs text-yellow-400 font-mono select-all mt-1">
                 </div>
 
-                <div class="grid grid-cols-2 gap-3 pt-1">
-                    <button onclick="sendAction('restart')" class="bg-dark-700 hover:bg-dark-900 border border-gray-600 hover:border-crimson-500 text-white py-2.5 rounded-lg text-xs font-semibold transition">RESTART ENGINE</button>
-                    <button onclick="sendAction('regen_secret')" class="bg-dark-700 hover:bg-dark-900 border border-gray-600 hover:border-crimson-500 text-white py-2.5 rounded-lg text-xs font-semibold transition">NEW SECRET</button>
-                </div>
-                <div class="space-y-3 pt-2">
-                    <div class="flex space-x-2">
-                        <input id="input-port" type="number" placeholder="New Client Port (e.g. 443)" class="flex-1 bg-dark-900 border border-gray-700 rounded p-2 text-xs text-white">
-                        <button onclick="sendAction('change_port', document.getElementById('input-port').value)" class="bg-crimson-600 hover:bg-crimson-500 px-4 py-2 rounded text-xs font-semibold text-white transition">SET PORT</button>
+                <div class="bg-dark-800 p-6 rounded-xl red-glow space-y-4">
+                    <h2 class="text-sm font-semibold uppercase tracking-wider text-crimson-400">System Parameters</h2>
+                    
+                    <div class="bg-dark-900 p-3 rounded-lg border border-crimson-500/50 space-y-1">
+                        <div class="flex justify-between items-center">
+                            <span class="text-xs font-bold text-crimson-400">RAW BASE SECRET (@MTProxybot)</span>
+                            <button onclick="copyVal('raw-sec-val')" class="text-[11px] bg-crimson-600 hover:bg-crimson-500 px-2.5 py-1 rounded text-white font-semibold transition">Copy Raw Secret</button>
+                        </div>
+                        <input id="raw-sec-val" readonly class="w-full bg-dark-800 border border-gray-700 rounded p-1.5 text-xs text-yellow-400 font-mono select-all mt-1">
                     </div>
-                    <div class="flex space-x-2">
-                        <input id="input-domain" type="text" placeholder="New Spoof Domain (e.g. apple.com)" class="flex-1 bg-dark-900 border border-gray-700 rounded p-2 text-xs text-white">
-                        <button onclick="sendAction('change_domain', document.getElementById('input-domain').value)" class="bg-crimson-600 hover:bg-crimson-500 px-4 py-2 rounded text-xs font-semibold text-white transition">SET DOMAIN</button>
+
+                    <div class="space-y-3 pt-2">
+                        <div class="flex space-x-2">
+                            <input id="input-secret" type="text" placeholder="Paste 32-hex Secret (or blank for random)" class="flex-1 bg-dark-900 border border-gray-700 rounded p-2 text-xs text-white font-mono">
+                            <button onclick="sendAction('set_secret', document.getElementById('input-secret').value)" class="bg-crimson-600 hover:bg-crimson-500 px-4 py-2 rounded text-xs font-semibold text-white transition">SET SECRET</button>
+                        </div>
+                        <div class="flex space-x-2">
+                            <input id="input-port" type="number" placeholder="New Client Port (e.g. 443)" class="flex-1 bg-dark-900 border border-gray-700 rounded p-2 text-xs text-white">
+                            <button onclick="sendAction('change_port', document.getElementById('input-port').value)" class="bg-dark-700 hover:bg-dark-800 border border-gray-600 px-4 py-2 rounded text-xs font-semibold text-white transition">SET PORT</button>
+                        </div>
+                        <div class="flex space-x-2">
+                            <input id="input-domain" type="text" placeholder="New Spoof Domain (e.g. apple.com)" class="flex-1 bg-dark-900 border border-gray-700 rounded p-2 text-xs text-white">
+                            <button onclick="sendAction('change_domain', document.getElementById('input-domain').value)" class="bg-dark-700 hover:bg-dark-800 border border-gray-600 px-4 py-2 rounded text-xs font-semibold text-white transition">SET DOMAIN</button>
+                        </div>
                     </div>
+
+                    <button onclick="sendAction('restart')" class="w-full bg-dark-700 hover:bg-dark-900 border border-gray-600 hover:border-crimson-500 text-white py-2 rounded-lg text-xs font-semibold transition mt-2">RESTART PROXY ENGINE</button>
                 </div>
             </div>
 
-            <div class="bg-dark-800 p-6 rounded-xl red-glow flex flex-col h-96">
+            <div class="bg-dark-800 p-6 rounded-xl red-glow flex flex-col h-full min-h-[500px]">
                 <h2 class="text-sm font-semibold uppercase tracking-wider text-crimson-400 mb-3">Live Service Logs</h2>
                 <pre id="log-console" class="flex-1 bg-dark-900 border border-gray-800 rounded-lg p-3 text-xs text-gray-400 overflow-y-auto font-mono whitespace-pre-wrap"></pre>
             </div>
@@ -309,11 +329,10 @@ HTML_TEMPLATE = """
     </div>
 
     <script>
+        // HTTP-Safe Fallback Clipboard Engine
         function copyVal(id) {
             const el = document.getElementById(id);
             if (!el || !el.value) return;
-            
-            // HTTP Copy Fallback Engine
             const temp = document.createElement("textarea");
             temp.value = el.value;
             temp.style.position = "fixed";
@@ -328,6 +347,41 @@ HTML_TEMPLATE = """
                 alert('Failed to auto-copy. Please select manually.');
             }
             document.body.removeChild(temp);
+        }
+
+        async function exportBackup() {
+            try {
+                const res = await fetch('/api/export');
+                const data = await res.json();
+                
+                const temp = document.createElement("textarea");
+                temp.value = data.backup;
+                temp.style.position = "fixed";
+                temp.style.left = "-999999px";
+                document.body.appendChild(temp);
+                temp.focus();
+                temp.select();
+                document.execCommand('copy');
+                document.body.removeChild(temp);
+                
+                alert('Backup String copied to clipboard! Save this securely.');
+            } catch(e) {
+                alert('Error exporting config.');
+            }
+        }
+
+        async function importBackup() {
+            const val = document.getElementById('input-backup').value.trim();
+            if(!val) return alert("Paste a backup string first.");
+            if(!confirm("WARNING: This will overwrite your current Proxy settings, GUI Port, and GUI Credentials, then restart the server. Continue?")) return;
+            
+            const formData = new FormData();
+            formData.append('action', 'import_config');
+            formData.append('value', val);
+            
+            await fetch('/api/action', { method: 'POST', body: formData });
+            alert("Settings Imported! Services are restarting. If you changed GUI Port or Credentials, you will need to reconnect now.");
+            setTimeout(() => location.reload(), 3000);
         }
 
         async function fetchStats() {
@@ -372,13 +426,18 @@ HTML_TEMPLATE = """
         }
 
         async function sendAction(action, val='') {
-            if(!confirm(`Execute action: ${action.toUpperCase()}?`)) return;
+            if(action !== 'import_config' && !confirm(`Execute action?`)) return;
             const formData = new FormData();
             formData.append('action', action);
             formData.append('value', val);
-            await fetch('/api/action', { method: 'POST', body: formData });
+            const r = await fetch('/api/action', { method: 'POST', body: formData });
+            const j = await r.json();
+            if(j.status === 'error') {
+                alert(j.msg);
+            }
             fetchStats();
             fetchLogs();
+            document.getElementById('input-secret').value = "";
         }
 
         setInterval(fetchStats, 2000);
@@ -395,6 +454,15 @@ HTML_TEMPLATE = """
 def index():
     return render_template_string(HTML_TEMPLATE)
 
+@app.route("/api/export")
+@requires_auth
+def api_export():
+    cfg1 = read_env_config(CONFIG_FILE)
+    cfg2 = read_env_config(GUI_CONFIG_FILE)
+    merged = {**cfg1, **cfg2}
+    b64 = base64.b64encode(json.dumps(merged).encode('utf-8')).decode('utf-8')
+    return jsonify({"backup": b64})
+
 @app.route("/api/stats")
 @requires_auth
 def api_stats():
@@ -403,7 +471,7 @@ def api_stats():
     active = subprocess.call(["systemctl", "is-active", "--quiet", "mtproxy"]) == 0
     clients = "0"
     load = "0.00"
-    cfg = read_env_config()
+    cfg = read_env_config(CONFIG_FILE)
     stats_port = cfg.get("STATS_PORT", "8888")
     try:
         req = urllib.request.urlopen(f"http://127.0.0.1:{stats_port}/stats", timeout=1)
@@ -448,7 +516,7 @@ def api_stats():
 @requires_auth
 def api_logs():
     try:
-        return subprocess.check_output(["journalctl", "-u", "mtproxy", "-n", "35", "--no-pager"]).decode("utf8")
+        return subprocess.check_output(["journalctl", "-u", "mtproxy", "-n", "45", "--no-pager"]).decode("utf8")
     except:
         return "Failed to read systemd logs."
 
@@ -457,20 +525,56 @@ def api_logs():
 def api_action():
     act = request.form.get("action")
     val = request.form.get("value", "").strip()
-    cfg = read_env_config()
-
+    
     if act == "restart":
         subprocess.call(["systemctl", "restart", "mtproxy"])
-    elif act == "regen_secret":
-        new_sec = os.urandom(16).hex()
-        subprocess.call(["sed", "-i", f"s/^RAW_SECRET=.*/RAW_SECRET=\"{new_sec}\"/", CONFIG_FILE])
+        
+    elif act == "set_secret":
+        if val == "":
+            val = os.urandom(16).hex()
+        elif len(val) != 32:
+            return jsonify({"status": "error", "msg": "Secret must be exactly 32 hexadecimal characters."})
+            
+        cfg = read_env_config(CONFIG_FILE)
+        cfg["RAW_SECRET"] = val
+        with open(CONFIG_FILE, "w") as f:
+            for k, v in cfg.items(): f.write(f'{k}="{v}"\n')
         subprocess.call(["systemctl", "restart", "mtproxy"])
+        
     elif act == "change_port" and val.isdigit() and 1 <= int(val) <= 65535:
-        subprocess.call(["sed", "-i", f"s/^PORT=.*/PORT={val}/", CONFIG_FILE])
+        cfg = read_env_config(CONFIG_FILE)
+        cfg["PORT"] = val
+        with open(CONFIG_FILE, "w") as f:
+            for k, v in cfg.items(): f.write(f'{k}="{v}"\n')
         subprocess.call(["systemctl", "restart", "mtproxy"])
+        
     elif act == "change_domain" and "." in val:
-        subprocess.call(["sed", "-i", f"s/^TLS_DOMAIN=.*/TLS_DOMAIN=\"{val}\"/", CONFIG_FILE])
+        cfg = read_env_config(CONFIG_FILE)
+        cfg["TLS_DOMAIN"] = val
+        with open(CONFIG_FILE, "w") as f:
+            for k, v in cfg.items(): f.write(f'{k}="{v}"\n')
         subprocess.call(["systemctl", "restart", "mtproxy"])
+        
+    elif act == "import_config":
+        try:
+            data = json.loads(base64.b64decode(val).decode('utf-8'))
+            
+            p_cfg = read_env_config(CONFIG_FILE)
+            for k in ["PORT", "STATS_PORT", "RAW_SECRET", "TLS_DOMAIN", "PROXY_TAG", "WORKERS"]:
+                if k in data: p_cfg[k] = data[k]
+            with open(CONFIG_FILE, "w") as f:
+                for k, v in p_cfg.items(): f.write(f'{k}="{v}"\n')
+                
+            g_cfg = read_env_config(GUI_CONFIG_FILE)
+            for k in ["GUI_PORT", "GUI_USER", "GUI_PASS"]:
+                if k in data: g_cfg[k] = data[k]
+            with open(GUI_CONFIG_FILE, "w") as f:
+                for k, v in g_cfg.items(): f.write(f'{k}="{v}"\n')
+
+            subprocess.call(["systemctl", "restart", "mtproxy"])
+            subprocess.Popen("sleep 1 && systemctl restart mtproxy-gui", shell=True)
+        except Exception as e:
+            return jsonify({"status": "error", "msg": "Invalid backup string."})
 
     return jsonify({"status": "ok"})
 
@@ -489,7 +593,7 @@ install_mtproxy() {
     
     echo -e "${GREEN}[1/7] Installing system packages & Python engines...${NC}"
     apt-get update -q
-    apt-get install -y -q git curl build-essential libssl-dev zlib1g-dev xxd cron python3-flask python3-psutil
+    apt-get install -y -q git curl build-essential libssl-dev zlib1g-dev xxd cron python3-flask python3-psutil libcap2-bin
 
     echo -e "${GREEN}[2/7] Compiling C Engine from source (GCC 11+ patched)...${NC}"
     rm -rf /tmp/MTProxy
@@ -502,6 +606,7 @@ install_mtproxy() {
     mkdir -p "$INSTALL_DIR"
     cp -f objs/bin/mtproto-proxy "$BIN_PATH"
     chmod +x "$BIN_PATH"
+    apply_port_capabilities
     cd ~ && rm -rf /tmp/MTProxy
 
     echo -e "${GREEN}[3/7] Fetching Telegram infrastructure configs...${NC}"
